@@ -48,12 +48,12 @@ const Page: FC = () => {
     abi: contractAbiERC20,
     address: contractAddress,
     watch: true,
-    refetchInterval: 1000
+    //refetchInterval: 1000
   });
   // Step 3 --> Read from a contract -- End
 
   // Step 4 --> Write to a contract -- Start
-  const [amount, setAmount] = useState<number | ''>(0);
+  const [amount, setAmount] = useState(0);
   const handleSubmit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     console.log("Form submitted with amount ", amount);
