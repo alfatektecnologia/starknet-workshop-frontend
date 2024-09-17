@@ -6,7 +6,7 @@ import "./globals.css";
 const inter = Inter({ subsets: ["latin"] });
 
 export const metadata: Metadata = {
-  title: "Basecamp X",
+  title: "Basecamp Brasil",
   description: "Starknet Frontend Workshop",
 };
 

@@ -1,19 +1,31 @@
 'use client';
+import Head from 'next/head';
 import { FC, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import dynamic from 'next/dynamic';
-import { useAccount, useBalance, useBlockNumber, useContract, useReadContract, useSendTransaction, useTransactionReceipt } from '@starknet-react/core';
-import { BlockNumber, Contract, RpcProvider } from "starknet";
-import { ABI } from "../abis/abi";
-import { type Abi } from "starknet";
+import {
+  useAccount,
+  useBalance,
+  useBlockNumber,
+  useContract,
+  useContractRead,
+  useContractWrite,
+  useExplorer,
+  useWaitForTransaction
+} from '@starknet-react/core';
+import { BlockNumber} from "starknet";
+import contractAbiERC20 from "../abis/abi_ERC20.json";
 import { formatAmount, shortenAddress } from '@/lib/utils';
 const WalletBar = dynamic(() => import('../components/WalletBar'), { ssr: false })
 const Page: FC = () => {
 
   // Step 1 --> Read the latest block -- Start
-  const { data: blockNumberData, isLoading: blockNumberIsLoading, isError: blockNumberIsError } = useBlockNumber({
+  const {
+    data: blockNumberData,
+    isLoading: blockNumberIsLoading,
+    isError: blockNumberIsError } = useBlockNumber({
     blockIdentifier: 'latest' as BlockNumber
   });
-  const workshopEnds = 180000;
+  const workshopEnds = 190000;
   // Step 1 --> Read the latest block -- End
 
   // Step 2 --> Read your balance -- Start
@@ -25,11 +37,15 @@ const Page: FC = () => {
   // Step 2 --> Read your balance -- End
 
   // Step 3 --> Read from a contract -- Start
-  const contractAddress = "0x1c758616421a10f9df071a5d985c72e3907cf98d553204cf8dee354647c736";
-  const { data: readData, refetch: dataRefetch, isError: readIsError, isLoading: readIsLoading, error: readError } = useReadContract({
-    functionName: "get_balance",
-    args: [],
-    abi: ABI as Abi,
+  const contractAddress = "0x002ca95b283dd7069514102ca3ef66cc6b072be9ddd1f050123595931ac8d571";
+  const { data: readData,
+    refetch: dataRefetch,
+    isError: readIsError,
+    isLoading: readIsLoading,
+    error: readError } = useContractRead({
+    functionName: "balance_of",
+    args: [userAddress!],
+    abi: contractAbiERC20,
     address: contractAddress,
     watch: true,
     refetchInterval: 1000
@@ -43,34 +59,32 @@ const Page: FC = () => {
     console.log("Form submitted with amount ", amount);
     writeAsync();
   };
-  const typedABI = ABI as Abi;
   const { contract } = useContract({
-    abi: typedABI,
+    abi: contractAbiERC20,
     address: contractAddress,
   });
   const calls = useMemo(() => {
     if (!userAddress || !contract) return [];
-    const safeAmount = amount || 0;
-    return [contract.populate("increase_balance", [safeAmount])];
+    return contract.populateTransaction ["mint"]!(userAddress, {
+      low: (amount ? amount : 0),
+      high: 0,
+    });
   }, [contract, userAddress, amount]);
   const {
-    send: writeAsync,
+     writeAsync,
     data: writeData,
     isPending: writeIsPending,
-  } = useSendTransaction({
+  } = useContractWrite({
     calls,
   });
+  const explorer = useExplorer();
   const {
     data: waitData,
     status: waitStatus,
     isLoading: waitIsLoading,
     isError: waitIsError,
     error: waitError
-  } = useTransactionReceipt({ hash: writeData?.transaction_hash, watch: true })
-  const handleAmountChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const value = event.target.value;
-    setAmount(value === '' ? '' : Number(value));
-  };
+  } = useWaitForTransaction({ hash: writeData?.transaction_hash, watch: true })
   const LoadingState = ({ message }: { message: string }) => (
     <div className="flex items-center space-x-2">
       <div className="animate-spin">
@@ -89,8 +103,8 @@ const Page: FC = () => {
     if (waitIsLoading) {
       return <LoadingState message="Waiting for confirmation..." />;
     }
-
-    if (waitStatus === "error") {
+    
+    if (waitData && waitData.status === "REJECTED") {
       return <LoadingState message="Transaction rejected..." />;
     }
 
@@ -101,276 +115,98 @@ const Page: FC = () => {
     return "Send";
   };
   // Step 4 --> Write to a contract -- End
-
-  // Step 5 --> Reset balance -- Start
-  const resetBalanceCall = useMemo(() => {
-    if (!contract) return undefined;
-    try {
-      return contract.populate("reset_balance");
-    } catch (error) {
-      console.error("Error populating reset_balance call:", error);
-      return undefined;
-    }
-  }, [contract]);
-  const {
-    send: resetBalance,
-    isPending: resetIsPending,
-    data: resetData,
-  } = useSendTransaction({
-    calls: resetBalanceCall ? [resetBalanceCall] : [],
-  });
-  // Step 5 --> Reset balance -- End
-
-  // Step 6 --> Get events from a contract -- Start
-  type ContractEvent = {
-    from_address: string;
-    keys: string[];
-    data: string[];
-  };
-  const provider = useMemo(() => new RpcProvider({ nodeUrl: process.env.NEXT_PUBLIC_RPC_URL }), []);
-  const [events, setEvents] = useState<ContractEvent[]>([]);
-  const lastCheckedBlockRef = useRef(0);
-  const { data: blockNumber } = useBlockNumber({ refetchInterval: 3000 });
-  const checkForEvents = useCallback(async (contract: Contract, currentBlockNumber: number) => {
-    if (currentBlockNumber <= lastCheckedBlockRef.current) {
-      return; // No new blocks, skip checking for events
-    }
-    try {
-      // Fetch events only for the new blocks
-      const fromBlock = lastCheckedBlockRef.current + 1;
-      const fetchedEvents = await provider.getEvents({
-        address: contract.address,
-        from_block: { block_number: fromBlock },
-        to_block: { block_number: currentBlockNumber },
-        chunk_size: 500,
-      });
-
-      if (fetchedEvents && fetchedEvents.events) {
-        setEvents(prevEvents => [...prevEvents, ...fetchedEvents.events]);
-      }
-
-      lastCheckedBlockRef.current = currentBlockNumber;
-    } catch (error) {
-      console.error('Error checking for events:', error);
-    }
-  }, [provider]);
-
-  useEffect(() => {
-    if (contract && blockNumber) {
-      checkForEvents(contract, blockNumber);
-    }
-  }, [contract, blockNumber, checkForEvents]);
-  const lastFiveEvents = useMemo(() => {
-    return [...events].reverse().slice(0, 5);
-  }, [events]);
-  // Step 6 --> Get events from a contract -- End
-
   return (
-    <div className="min-h-screen bg-gray-100 p-4 flex flex-col">
-      <h1 className="text-3xl font-bold text-center mb-6">Starknet Frontend Workshop</h1>
+    <div className="h-screen flex flex-col justify-center items-center">
+      <Head>
+        <title>Frontend Workshop</title>
+      </Head>
+      <div className="flex flex-row mb-4">
+        <WalletBar />
+      </div>
 
-      <div className="flex flex-wrap justify-center gap-4">
-
-        <div className="w-full max-w-md space-y-4">
-
-          <div className="bg-white p-4 border-black border">
-            <h2 className="text-xl font-bold mb-2">Wallet Connection</h2>
-            <WalletBar />
-          </div>
-
-          {/* Step 1 --> Read the latest block -- Start */}
-          {!blockNumberIsLoading && !blockNumberIsError && (
-            <div className={`p-4 border-black border ${blockNumberData! < workshopEnds ? "bg-green-500" : "bg-red-500"}`}>
-              <h3 className="text-lg font-bold mb-2">Read the Blockchain</h3>
-              <p>Current Block: {blockNumberData}</p>
-              <p>{blockNumberData! < workshopEnds ? "Workshop is live" : "Workshop has ended"}</p>
-            </div>
-          )}
-          {/* <div className={`p-4 border-black border`}>
-            <h3 className="text-lg font-bold mb-2">Read the Blockchain</h3>
-            <p>Current Block: 0</p>
-          </div> */}
-          {/* Step 1 --> Read the latest block -- End */}
-
-          {/* Step 2 --> Read your balance -- Start */}
-          {!balanceIsLoading && !balanceIsError && userAddress && (
-            <div className="p-4 bg-white border-black border">
-              <h3 className="text-lg font-bold mb-2">Your Balance</h3>
-              <p>Symbol: {balanceData?.symbol}</p>
-              <p>Balance: {Number(balanceData?.formatted).toFixed(4)}</p>
-            </div>
-          )}
-          {/* <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">Your Balance</h3>
-            <p>Symbol: XYZ</p>
-            <p>Balance: 100</p>
-          </div> */}
-          {/* Step 2 --> Read your balance -- End */}
-
-          {/* Step 5 --> Reset balance by owner only -- Start */}
-          <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">Reset Balance</h3>
-            <button
-              onClick={() => resetBalance()}
-              disabled={resetIsPending || !resetBalanceCall || !userAddress}
-              className="mt-2 border border-black text-black font-regular py-2 px-4 bg-yellow-300 hover:bg-yellow-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
-            >
-              {resetIsPending ? <LoadingState message="Resetting..." /> : "Reset Balance"}
-            </button>
-            {resetData?.transaction_hash && (
-              <p className="mt-2 text-sm">
-                Transaction sent: {resetData.transaction_hash}
-              </p>
-            )}
-          </div>
-          {/* <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">Reset Balance</h3>
-            <button
-              onClick={() => console.log("Resetting...")}
-              disabled={false}
-              className="mt-2 border border-black text-black font-regular py-2 px-4 bg-yellow-300 hover:bg-yellow-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
-            >
-              Reset Balance
-            </button>
-            <p className="mt-2 text-sm">
-              Transaction sent: url
-            </p>
-          </div> */}
-          {/* Step 5 --> Reset balance by owner only -- End */}
+      {/* Step 1 --> Read the latest block -- Start */}
+      {!blockNumberIsLoading && !blockNumberIsError && (
+        <div
+          className={`p-4 w-full max-w-md m-4 border-black border ${blockNumberData! < workshopEnds ? "bg-green-500" : "bg-red-500"}`}
+        >
+          <h3 className="text-2xl font-bold mb-2">Read the Blockchain</h3>
+          <p>Current Block Number: {blockNumberData}</p>
+          {blockNumberData! < workshopEnds ? "We're live on Workshop" : "Workshop has ended"}
         </div>
+      )}
 
-        <div className="w-full max-w-md space-y-4">
+      {/* Step 1 --> Read the latest block -- End */}
 
-          {/* Step 3 --> Read from a contract -- Start */}
-          <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">Contract Balance</h3>
-            <p>Balance: {readData?.toString()}</p>
-            <button
-              onClick={() => dataRefetch()}
-              className="mt-2 border border-black text-black font-regular py-1 px-3 bg-yellow-300 hover:bg-yellow-500"
-            >
-              Refresh
-            </button>
-          </div>
-          {/* <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">Contract Balance</h3>
-            <p>Balance: 0</p>
-            <button
-              onClick={() => console.log("Refreshing...")}
-              className="mt-2 border border-black text-black font-regular py-1 px-3 bg-yellow-300 hover:bg-yellow-500"
-            >
-              Refresh
-            </button>
-          </div> */}
-          {/* Step 3 --> Read from a contract -- End */}
+      {/* Step 2 --> Read your balance -- Start */}
+      {!balanceIsLoading && !balanceIsError && (
+        <div
+          className={`p-4 w-full max-w-md m-4 bg-white border-black border`}
+        >
+          <h3 className="text-2xl font-bold mb-2">Read your Balance</h3>
+          <p>Symbol: {balanceData?.symbol}</p>
+          <p>Balance: {Number(balanceData?.formatted).toFixed(4)}</p>
+        </div>
+      )}
 
-          {/* Step 4 --> Write to a contract -- Start */}
-          <form onSubmit={handleSubmit} className="bg-white p-4 border-black border">
-            <h3 className="text-lg font-bold mb-2">Write to Contract</h3>
-            <label htmlFor="amount" className="block text-sm font-medium text-gray-700">Amount:</label>
-            <input
-              type="number"
-              id="amount"
-              value={amount}
-              onChange={handleAmountChange}
-              className="block w-full px-3 py-2 text-sm leading-6 border-black focus:outline-none focus:border-yellow-300 black-border-p"
-            />
-            <button
-              type="submit"
-              className="mt-3 border border-black text-black font-regular py-2 px-4 bg-yellow-300 hover:bg-yellow-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
-              disabled={!userAddress || writeIsPending}
-            >
-              {buttonContent()}
-            </button>
-            {writeData?.transaction_hash && (
-              <a
-                href={`https://sepolia.voyager.online/tx/${writeData?.transaction_hash}`}
-                target="_blank"
-                className="block mt-2 text-blue-500 hover:text-blue-700 underline"
-                rel="noreferrer"
-              >
-                Check TX on Sepolia
-              </a>
-            )}
-          </form>
-          {/* <form className="bg-white p-4 border-black border">
-            <h3 className="text-lg font-bold mb-2">Write to Contract</h3>
-            <label htmlFor="amount" className="block text-sm font-medium text-gray-700">Amount:</label>
-            <input
-              type="number"
-              id="amount"
-              className="block w-full px-3 py-2 text-sm leading-6 border-black focus:outline-none focus:border-yellow-300 black-border-p"
-            />
-            <button
-              type="submit"
-              className="mt-3 border border-black text-black font-regular py-2 px-4 bg-yellow-300 hover:bg-yellow-500 disabled:bg-gray-300 disabled:cursor-not-allowed"
-            >
-              Send
-            </button>
-            <a
-              href={`https://sepolia.voyager.online/tx/`}
-              target="_blank"
-              className="block mt-2 text-blue-500 hover:text-blue-700 underline"
-              rel="noreferrer"
-            >
-              Check TX on Sepolia
-            </a>
-          </form> */}
-          {/* Step 4 --> Write to a contract -- End */}
+      {/* Step 2 --> Read your balance -- End */}
 
-          {/* Step 6 --> Get events from a contract -- Start */}
-          <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">
-              Contract Events ({events.length})
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="border-b border-gray-300 text-left p-2 font-semibold">Sender</th>
-                    <th className="border-b border-gray-300 text-right p-2 font-semibold">Added</th>
-                    <th className="border-b border-gray-300 text-right p-2 font-semibold">New Balance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {lastFiveEvents.map((event, index) => (
-                    <tr key={index} className={index % 2 === 0 ? 'bg-gray-50' : ''}>
-                      <td className="border-b border-gray-200 p-2">{shortenAddress(event.keys[1])}</td>
-                      <td className="border-b border-gray-200 p-2 text-right">{formatAmount(event.data[0])}</td>
-                      <td className="border-b border-gray-200 p-2 text-right">{formatAmount(event.data[2])}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          </div>
-          {/* <div className="p-4 bg-white border-black border">
-            <h3 className="text-lg font-bold mb-2">
-              Contract Events (X)
-            </h3>
-            <div className="overflow-x-auto">
-              <table className="w-full border-collapse">
-                <thead>
-                  <tr>
-                    <th className="border-b border-gray-300 text-left p-2 font-semibold">Sender</th>
-                    <th className="border-b border-gray-300 text-right p-2 font-semibold">Added</th>
-                    <th className="border-b border-gray-300 text-right p-2 font-semibold">New Balance</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr key={0}>
-                    <td className="border-b border-gray-200 p-2">0xNestor</td>
-                    <td className="border-b border-gray-200 p-2 text-right">1</td>
-                    <td className="border-b border-gray-200 p-2 text-right">1</td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          </div> */}
-          {/* Step 6 --> Get events from a contract -- End */}
+      {/* Step 3 --> Read from a contract -- Start */}
+      <div
+        className={`p-4 w-full max-w-md m-4 bg-white border-black border`}
+      >
+        <h3 className="text-2xl font-bold mb-2">Read your Contract</h3>
+        <p>Balance: {readData?.toString()}</p>
+        <div className="flex justify-center pt-4">
+          <button
+            onClick={() => dataRefetch()}
+            className={`border border-black text-black font-regular py-2 px-4 bg-yellow-300 hover:bg-yellow-500`}
+          >
+            Refresh
+          </button>
         </div>
       </div>
-    </div >
+
+      {/* Step 3 --> Read from a contract -- End */}
+
+      {/* Step 4 --> Write to a contract -- Start */}
+      <form onSubmit={handleSubmit} className="bg-white p-4 w-full max-w-md m-4 border-black border">
+        <h3 className="text-2xl font-bold mb-2">Mint ERC20</h3>
+        <label
+          htmlFor="amount"
+          className="block text-sm font-medium leading-6 text-gray-900"
+        >
+          Amount:
+        </label>
+        <input
+          type="number"
+          id="amount"
+          value={amount}
+          onChange={(event) => setAmount(event.target.valueAsNumber)}
+          className="block w-full px-3 py-2 text-sm leading-6 border-black focus:outline-none focus:border-yellow-300 black-border-p"
+        />
+        {writeData?.transaction_hash && (
+          <a
+            href={explorer.transaction(writeData?.transaction_hash)}
+            target="_blank"
+            className="text-blue-500 hover:text-blue-700 underline"
+            rel="noreferrer"
+          >
+            Check TX on {explorer.name}</a>
+        )}
+        <div className="flex justify-center pt-4">
+          <button
+            type="submit"
+            className={`border border-black text-black font-regular py-2 px-4 ${userAddress ? "bg-yellow-300 hover:bg-yellow-500" : "bg-white"} `}
+            disabled={!userAddress}
+          >
+            {buttonContent()}
+          </button>
+        </div>
+      </form>
+
+      {/* Step 4 --> Write to a contract -- End */}
+
+    </div>
   );
 };
 
